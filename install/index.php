@@ -25,10 +25,10 @@ class leadspace_timetracker extends CModule
         include(__DIR__ . '/version.php');
         $this->MODULE_VERSION = $arModuleVersion["VERSION"];
         $this->MODULE_VERSION_DATE = $arModuleVersion["VERSION_DATE"];
-        $this->MODULE_NAME = GetMessage("PARSER_MODULE_NAME");
-        $this->MODULE_DESCRIPTION = GetMessage("PARSER_MODULE_DESC");
-        $this->PARTNER_NAME = GetMessage("PARSER_PARTNER_NAME");
-        $this->PARTNER_URI = GetMessage("PARSER_PARTNER_URI");
+        $this->MODULE_NAME = Loc::getMessage("LEADSPACE_MODULE_NAME");
+        $this->MODULE_DESCRIPTION = Loc::getMessage("LEADSPACE_MODULE_DESC");
+        $this->PARTNER_NAME = Loc::getMessage("LEADSPACE_PARTNER_NAME");
+        $this->PARTNER_URI = Loc::getMessage("LEADSPACE_PARTNER_URI");
     }
 
     public function InstallDB()
@@ -55,7 +55,7 @@ class leadspace_timetracker extends CModule
             ModuleManager::registerModule($this->MODULE_ID);
 
             $APPLICATION->IncludeAdminFile(
-                Loc::getMessage("PARSER_INSTALL_TITLE"),
+                Loc::getMessage("LEADSPACE_INSTALL_TITLE"),
                 __DIR__ . '/step1.php'
             );
         }
@@ -71,7 +71,7 @@ class leadspace_timetracker extends CModule
         ModuleManager::unRegisterModule($this->MODULE_ID);
 
         $APPLICATION->IncludeAdminFile(
-            Loc::getMessage("PARSER_UNINSTALL_TITLE"),
+            Loc::getMessage("LEADSPACE_UNINSTALL_TITLE"),
             __DIR__ . '/unstep1.php'
         );
     }
@@ -117,10 +117,10 @@ class leadspace_timetracker extends CModule
     public function InstallCron()
     {
                 CAgent::AddAgent(
-            "\\AgentFunctions\\Agent::run();", // Команда для выполнения
+            "\\LeadSpace\\AgentFunctions\\Agent::run();", // Команда для выполнения
             "leadspace.timetracker",                      // Модуль
             "N",                                  // Не повторять при ошибке
-            300,                                // Интервал 
+            60,                                // Интервал 
             "",                                    // Дата первой проверки
             "Y",                                   // Активность
             "",                                   // Дата следующего запуска

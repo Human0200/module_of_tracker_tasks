@@ -11,11 +11,26 @@ use Exception;
 class TimeTrackerManager
 {
     /**
+     * Записать лог в файл (только ошибки)
+     */
+    private function writeLog($message)
+    {
+        // Логируем только ошибки
+        if (strpos($message, 'ERROR') === 0) {
+            $logFile = __DIR__ . '/time_tracker.txt';
+            $timestamp = date('Y-m-d H:i:s');
+            $logMessage = "[{$timestamp}] {$message}\n";
+            file_put_contents($logFile, $logMessage, FILE_APPEND | LOCK_EX);
+        }
+    }
+    
+    /**
      * Инициализация модуля задач
      */
     private function initTasksModule()
     {
         if (!CModule::IncludeModule('tasks')) {
+            $this->writeLog('ERROR: Модуль "Задачи и проекты" не установлен');
             throw new Exception('Ошибка: Модуль "Задачи и проекты" не установлен');
         }
     }
@@ -33,35 +48,19 @@ class TimeTrackerManager
     }
     
     /**
-     * Форматирование времени
-     */
-    private function formatTime($seconds)
-    {
-        $hours = floor($seconds / 3600);
-        $minutes = floor(($seconds % 3600) / 60);
-        $secs = $seconds % 60;
-        
-        if ($hours > 0) {
-            return sprintf('%d:%02d:%02d', $hours, $minutes, $secs);
-        } else {
-            return sprintf('%d:%02d', $minutes, $secs);
-        }
-    }
-    
-    /**
-     * Проверка наличия значков таймера в названии
+     * Проверка наличия значков таймера в названии (без времени)
      */
     private function hasTimerIcon($title)
     {
         $timerPatterns = [
-            '/⏱️\s*[\d:]+\s*\|/',           // ⏱️ 6:48 |
-            '/\[В РАБОТЕ\s+[\d:]+\]/',      // [В РАБОТЕ 6:48]
-            '/🔥\s*[\d:]+\s*-/',            // 🔥 6:48 -
-            '/АКТИВНО\s*\([\d:]+\)/',       // АКТИВНО (6:48)
-            '/\[РАБОТА\s+[\d:]+\]/',        // [РАБОТА 6:48]
-            '/⏰\s*[\d:]+/',                 // ⏰ 6:48
-            '/🟢\s*[\d:]+/',                // 🟢 6:48
-            '/▶️\s*[\d:]+/'                 // ▶️ 6:48
+            '/⏱️\s*[\d:]*\s*\|/',           // ⏱️ | или ⏱️ 6:48 |
+            '/\[В РАБОТЕ(\s+[\d:]+)?\]/',   // [В РАБОТЕ] или [В РАБОТЕ 6:48]
+            '/🔥\s*[\d:]*\s*-/',            // 🔥 - или 🔥 6:48 -
+            '/АКТИВНО(\s*\([\d:]+\))?/',    // АКТИВНО или АКТИВНО (6:48)
+            '/\[РАБОТА(\s+[\d:]+)?\]/',     // [РАБОТА] или [РАБОТА 6:48]
+            '/⏰(\s*[\d:]+)?/',              // ⏰ или ⏰ 6:48
+            '/🟢(\s*[\d:]+)?/',             // 🟢 или 🟢 6:48
+            '/▶️(\s*[\d:]+)?/'              // ▶️ или ▶️ 6:48
         ];
         
         foreach ($timerPatterns as $pattern) {
@@ -73,19 +72,19 @@ class TimeTrackerManager
     }
     
     /**
-     * Очистка названия от значков таймера
+     * Очистка названия от значков таймера (включая время)
      */
     private function cleanTimerFromTitle($title)
     {
         $cleaningPatterns = [
-            '/⏱️\s*[\d:]+\s*\|\s*/',        // ⏱️ 6:48 |
-            '/\[В РАБОТЕ\s+[\d:]+\]\s*/',   // [В РАБОТЕ 6:48]
-            '/🔥\s*[\d:]+\s*-\s*/',         // 🔥 6:48 -
-            '/АКТИВНО\s*\([\d:]+\)\s*/',    // АКТИВНО (6:48)
-            '/\[РАБОТА\s+[\d:]+\]\s*/',     // [РАБОТА 6:48]
-            '/⏰\s*[\d:]+\s*/',              // ⏰ 6:48
-            '/🟢\s*[\d:]+\s*/',             // 🟢 6:48
-            '/▶️\s*[\d:]+\s*/'              // ▶️ 6:48
+            '/⏱️\s*[\d:]*\s*\|\s*/',        // ⏱️ | или ⏱️ 6:48 |
+            '/\[В РАБОТЕ(\s+[\d:]+)?\]\s*/', // [В РАБОТЕ] или [В РАБОТЕ 6:48]
+            '/🔥\s*[\d:]*\s*-\s*/',         // 🔥 - или 🔥 6:48 -
+            '/АКТИВНО(\s*\([\d:]+\))?\s*/', // АКТИВНО или АКТИВНО (6:48)
+            '/\[РАБОТА(\s+[\d:]+)?\]\s*/',  // [РАБОТА] или [РАБОТА 6:48]
+            '/⏰(\s*[\d:]+)?\s*/',           // ⏰ или ⏰ 6:48
+            '/🟢(\s*[\d:]+)?\s*/',          // 🟢 или 🟢 6:48
+            '/▶️(\s*[\d:]+)?\s*/'           // ▶️ или ▶️ 6:48
         ];
         
         $cleanTitle = $title;
@@ -104,21 +103,37 @@ class TimeTrackerManager
         $activeTimerTasks = [];
         $usersToCheck = [];
         
-        // Получаем всех пользователей с задачами
-        $rsTask = CTasks::GetList(['ID' => 'DESC'], [], ['RESPONSIBLE_ID', 'CREATED_BY']);
-        while ($task = $rsTask->Fetch()) {
-            if (!in_array($task['RESPONSIBLE_ID'], $usersToCheck)) {
-                $usersToCheck[] = $task['RESPONSIBLE_ID'];
+        // Пробуем получить пользователей через задачи
+        try {
+            $rsTask = CTasks::GetList(['ID' => 'DESC'], [], ['RESPONSIBLE_ID', 'CREATED_BY']);
+            while ($task = $rsTask->Fetch()) {
+                if (!empty($task['RESPONSIBLE_ID']) && !in_array($task['RESPONSIBLE_ID'], $usersToCheck)) {
+                    $usersToCheck[] = $task['RESPONSIBLE_ID'];
+                }
+                if (!empty($task['CREATED_BY']) && !in_array($task['CREATED_BY'], $usersToCheck)) {
+                    $usersToCheck[] = $task['CREATED_BY'];
+                }
             }
-            if (!in_array($task['CREATED_BY'], $usersToCheck)) {
-                $usersToCheck[] = $task['CREATED_BY'];
+        } catch (Exception $e) {
+            $this->writeLog('ERROR: Ошибка получения пользователей через задачи: ' . $e->getMessage());
+        }
+        
+        // Если не получилось через задачи, берем активных пользователей
+        if (empty($usersToCheck)) {
+            try {
+                $rsUsers = CUser::GetList(($by='ID'), ($order='ASC'), ['ACTIVE' => 'Y'], ['FIELDS' => ['ID']]);
+                while ($user = $rsUsers->Fetch()) {
+                    $usersToCheck[] = $user['ID'];
+                }
+            } catch (Exception $e) {
+                $this->writeLog('ERROR: Ошибка получения активных пользователей: ' . $e->getMessage());
             }
         }
         
-        // Удаляем дубликаты и проверяем активные таймеры
-        $usersToCheck = array_unique($usersToCheck);
-        
-        foreach ($usersToCheck as $userId) {
+        // Проверяем активные таймеры
+        foreach (array_unique($usersToCheck) as $userId) {
+            if (empty($userId)) continue;
+            
             try {
                 $timer = CTaskTimerManager::getInstance($userId);
                 $runningTask = $timer->getRunningTask();
@@ -139,26 +154,54 @@ class TimeTrackerManager
     }
     
     /**
-     * Получение задач со значками таймеров
+     * Очистка задач от значков таймеров через SQL
      */
-    private function getTasksWithTimerIcons()
+    private function cleanTimerIconsViaSql($activeTimerTasks)
     {
-        $tasksWithTimerIcons = [];
+        global $DB;
+        $cleanedCount = 0;
         
-        // Ищем все задачи
-        $rsAllTasks = CTasks::GetList(
-            ['ID' => 'DESC'],
-            [], // без фильтра - все задачи
-            ['ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID', 'ALLOW_TIME_TRACKING']
-        );
-        
-        while ($task = $rsAllTasks->Fetch()) {
-            if ($this->hasTimerIcon($task['TITLE'])) {
-                $tasksWithTimerIcons[] = $task;
+        try {
+            // Ищем задачи со значками таймеров
+            $sql = "SELECT ID, TITLE FROM b_tasks WHERE 
+                       TITLE LIKE '%⏱️%' OR 
+                       TITLE LIKE '%[В РАБОТЕ%' OR 
+                       TITLE LIKE '%🔥%' OR 
+                       TITLE LIKE '%АКТИВНО%' OR 
+                       TITLE LIKE '%[РАБОТА%' OR 
+                       TITLE LIKE '%⏰%' OR 
+                       TITLE LIKE '%🟢%' OR 
+                       TITLE LIKE '%▶️%'";
+            
+            $result = $DB->Query($sql);
+            $tasksToClean = [];
+            
+            while ($task = $result->Fetch()) {
+                if ($this->hasTimerIcon($task['TITLE'])) {
+                    $tasksToClean[] = $task;
+                }
             }
+            
+            // Очищаем задачи, которые не имеют активных таймеров
+            foreach ($tasksToClean as $task) {
+                $taskId = $task['ID'];
+                
+                // Если нет активного таймера - очищаем
+                if (!isset($activeTimerTasks[$taskId])) {
+                    $cleanTitle = $this->cleanTimerFromTitle($task['TITLE']);
+                    $result = $this->updateTask($taskId, $cleanTitle);
+                    
+                    if ($result['success']) {
+                        $cleanedCount++;
+                    }
+                }
+            }
+            
+        } catch (Exception $e) {
+            $this->writeLog('ERROR: Ошибка при очистке через SQL: ' . $e->getMessage());
         }
         
-        return $tasksWithTimerIcons;
+        return $cleanedCount;
     }
     
     /**
@@ -173,9 +216,11 @@ class TimeTrackerManager
             if ($updateResult) {
                 return ['success' => true, 'message' => 'Обновлено успешно'];
             } else {
+                $this->writeLog('ERROR: Не удалось обновить задачу #' . $taskId . ': ' . $taskObj->LAST_ERROR);
                 return ['success' => false, 'message' => $taskObj->LAST_ERROR];
             }
         } catch (Exception $e) {
+            $this->writeLog('ERROR: Исключение при обновлении задачи #' . $taskId . ': ' . $e->getMessage());
             return ['success' => false, 'message' => $e->getMessage()];
         }
     }
@@ -190,112 +235,64 @@ class TimeTrackerManager
         // Шаг 1: Поиск активных таймеров
         $activeTimerTasks = $this->getActiveTimers();
         
-        // Шаг 2: Поиск задач со значками таймеров
-        $tasksWithTimerIcons = $this->getTasksWithTimerIcons();
+        // Шаг 2: Очищаем задачи от значков (передаем активные таймеры)
+        $cleanedCount = $this->cleanTimerIconsViaSql($activeTimerTasks);
         
-        // Шаг 3: Анализ действий
-        $toClean = [];      // Задачи для очистки (нет активного таймера)
-        $toUpdate = [];     // Задачи для обновления времени (есть активный таймер)
-        
-        foreach ($tasksWithTimerIcons as $task) {
-            $taskId = $task['ID'];
-            
-            if (isset($activeTimerTasks[$taskId])) {
-                // Есть активный таймер - нужно обновить время
-                $toUpdate[] = [
-                    'task' => $task,
-                    'timer' => $activeTimerTasks[$taskId]
-                ];
-            } else {
-                // Нет активного таймера - нужно очистить
-                $toClean[] = $task;
-            }
-        }
-        
-        // Шаг 4: Проверка активных задач без значков
-        $toAdd = []; // Активные задачи без значков
-        
-        foreach ($activeTimerTasks as $taskId => $timerData) {
-            // Проверяем, есть ли эта задача уже в списке для обновления
-            $alreadyHasIcon = false;
-            foreach ($toUpdate as $updateItem) {
-                if ($updateItem['task']['ID'] == $taskId) {
-                    $alreadyHasIcon = true;
-                    break;
-                }
-            }
-            
-            if (!$alreadyHasIcon) {
-                // Получаем информацию о задаче
-                $rsTaskInfo = CTasks::GetList([], ['ID' => $taskId], ['ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID']);
-                if ($taskInfo = $rsTaskInfo->Fetch()) {
-                    $toAdd[] = [
-                        'task' => $taskInfo,
-                        'timer' => $timerData
-                    ];
-                }
-            }
-        }
-        
-        // Шаг 5: Выполнение операций
+        // Шаг 3: Добавляем значки к активным задачам
         $successCount = 0;
         $errorCount = 0;
         
-        // 5.1. Очищаем задачи без активных таймеров
-        foreach ($toClean as $task) {
-            $taskId = $task['ID'];
-            $cleanTitle = $this->cleanTimerFromTitle($task['TITLE']);
+        foreach ($activeTimerTasks as $taskId => $timerData) {
+            $taskInfo = null;
             
-            $result = $this->updateTask($taskId, $cleanTitle);
-            
-            if ($result['success']) {
-                $successCount++;
-            } else {
-                $errorCount++;
+            // Способ 1: через CTasks::GetList
+            try {
+                $rsTaskInfo = CTasks::GetList([], ['ID' => $taskId], ['ID', 'TITLE', 'STATUS', 'RESPONSIBLE_ID']);
+                if ($rsTaskInfo && ($taskInfo = $rsTaskInfo->Fetch())) {
+                    // Получили данные успешно
+                }
+            } catch (Exception $e) {
+                // Попробуем другой способ
             }
-        }
-        
-        // 5.2. Обновляем время в активных задачах
-        foreach ($toUpdate as $item) {
-            $task = $item['task'];
-            $timer = $item['timer'];
-            $taskId = $task['ID'];
             
-            $cleanTitle = $this->cleanTimerFromTitle($task['TITLE']);
-            $currentTime = $this->formatTime($timer['timer_info']['RUN_TIME']);
-            $newTitle = "⏱️ {$currentTime} | {$cleanTitle}";
-            
-            $result = $this->updateTask($taskId, $newTitle);
-            
-            if ($result['success']) {
-                $successCount++;
-            } else {
-                $errorCount++;
+            // Способ 2: через SQL напрямую
+            if (!$taskInfo) {
+                try {
+                    global $DB;
+                    $sql = "SELECT ID, TITLE FROM b_tasks WHERE ID = " . intval($taskId);
+                    $result = $DB->Query($sql);
+                    if ($task = $result->Fetch()) {
+                        $taskInfo = $task;
+                    }
+                } catch (Exception $e) {
+                    $this->writeLog('ERROR: Не удалось получить задачу #' . $taskId . ' через SQL: ' . $e->getMessage());
+                }
             }
-        }
-        
-        // 5.3. Добавляем значки к активным задачам
-        foreach ($toAdd as $item) {
-            $task = $item['task'];
-            $timer = $item['timer'];
-            $taskId = $task['ID'];
             
-            $currentTime = $this->formatTime($timer['timer_info']['RUN_TIME']);
-            $newTitle = "⏱️ {$currentTime} | {$task['TITLE']}";
-            
-            $result = $this->updateTask($taskId, $newTitle);
-            
-            if ($result['success']) {
-                $successCount++;
+            // Если получили информацию о задаче
+            if ($taskInfo && !empty($taskInfo['TITLE'])) {
+                // Проверяем, есть ли уже значок
+                if (!$this->hasTimerIcon($taskInfo['TITLE'])) {
+                    $newTitle = "⏱️ | {$taskInfo['TITLE']}";
+                    $result = $this->updateTask($taskId, $newTitle);
+                    
+                    if ($result['success']) {
+                        $successCount++;
+                    } else {
+                        $errorCount++;
+                    }
+                }
             } else {
+                $this->writeLog('ERROR: Не удалось получить информацию о задаче #' . $taskId);
                 $errorCount++;
             }
         }
         
         return [
             'success' => $successCount,
+            'cleaned' => $cleanedCount,
             'errors' => $errorCount,
-            'total' => count($toClean) + count($toUpdate) + count($toAdd)
+            'total' => $successCount + $cleanedCount
         ];
     }
     
@@ -304,6 +301,7 @@ class TimeTrackerManager
      */
     public function getActiveTimersInfo()
     {
+        $this->writeLog('INFO: Запрос информации об активных таймерах');
         $this->initTasksModule();
         return $this->getActiveTimers();
     }

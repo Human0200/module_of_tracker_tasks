@@ -1,13 +1,12 @@
 <?php
 
 use Bitrix\Main\Localization\Loc;
-use Settings24\GlobalSettings;
 
 AddEventHandler('main', 'OnBuildGlobalMenu', 'SupportMenu');
 
 function SupportMenu(&$arGlobalMenu, &$arModuleMenu)
 {
-    $moduleId = GlobalSettings::getId();
+    $moduleId = 'leadspace.timetracker';
 
     if ($GLOBALS['APPLICATION']->GetGroupRight($moduleId) < 'R') {
         return;

@@ -1,5 +1,5 @@
 <?php
-namespace Settings24;
+namespace LeadSpace\Settings24;
 
 class GlobalSettings
 {
