@@ -1,0 +1,425 @@
+<?php
+
+namespace LeadSpace\WebhookApp;
+
+use Throwable;
+
+/**
+ * Обходит задачи через несколько входящих вебхуков (админ + исполнители).
+ * У каждого вебхука смотрит timerIsRunningForCurrentUser и склеивает активные таймеры.
+ * Обновление TITLE — через admin-клиент (права на все задачи).
+ */
+class TimeTrackerService
+{
+    /** @var list<BitrixClient> */
+    private array $clients;
+    private BitrixClient $updateClient;
+    private Logger $logger;
+    private string $timerPrefix;
+
+    /** @var list<string> */
+    private array $timerPatterns = [
+        '/⏱️\s*[\d:]*\s*\|/',
+        '/\[В РАБОТЕ(\s+[\d:]+)?\]/',
+        '/🔥\s*[\d:]*\s*-/',
+        '/АКТИВНО(\s*\([\d:]+\))?/',
+        '/\[РАБОТА(\s+[\d:]+)?\]/',
+        '/⏰(\s*[\d:]+)?/',
+        '/🟢(\s*[\d:]+)?/',
+        '/▶️(\s*[\d:]+)?/',
+    ];
+
+    /** @var list<string> */
+    private array $cleaningPatterns = [
+        '/⏱️\s*[\d:]*\s*\|\s*/',
+        '/\[В РАБОТЕ(\s+[\d:]+)?\]\s*/',
+        '/🔥\s*[\d:]*\s*-\s*/',
+        '/АКТИВНО(\s*\([\d:]+\))?\s*/',
+        '/\[РАБОТА(\s+[\d:]+)?\]\s*/',
+        '/⏰(\s*[\d:]+)?\s*/',
+        '/🟢(\s*[\d:]+)?\s*/',
+        '/▶️(\s*[\d:]+)?\s*/',
+    ];
+
+    /** @var list<string> */
+    private array $titleMarkers = [
+        '⏱️',
+        '[В РАБОТЕ',
+        '🔥',
+        'АКТИВНО',
+        '[РАБОТА',
+        '⏰',
+        '🟢',
+        '▶️',
+    ];
+
+    /**
+     * @param list<BitrixClient> $clients вебхуки для опроса таймеров
+     * @param BitrixClient $updateClient вебхук с правами на обновление задач (обычно админ)
+     */
+    public function __construct(
+        array $clients,
+        BitrixClient $updateClient,
+        Logger $logger,
+        string $timerPrefix = '⏱️ | '
+    ) {
+        if ($clients === []) {
+            throw new \InvalidArgumentException('Нужен хотя бы один webhook-клиент');
+        }
+        $this->clients = $clients;
+        $this->updateClient = $updateClient;
+        $this->logger = $logger;
+        $this->timerPrefix = $timerPrefix;
+    }
+
+    /**
+     * @return list<array<string, mixed>>
+     */
+    public function pingAll(): array
+    {
+        $profiles = [];
+        foreach ($this->clients as $i => $client) {
+            try {
+                $response = $client->call('profile');
+                $profiles[] = [
+                    'index' => $i,
+                    'ok' => true,
+                    'profile' => $response['result'] ?? $response,
+                ];
+            } catch (Throwable $e) {
+                $profiles[] = [
+                    'index' => $i,
+                    'ok' => false,
+                    'error' => $e->getMessage(),
+                ];
+            }
+        }
+        return $profiles;
+    }
+
+    /**
+     * @return array{success:int,cleaned:int,errors:int,active:int,scanned:int,active_tasks:list<array>}
+     */
+    public function runOnce(): array
+    {
+        $scan = $this->scanAllWebhooksForActiveTimers();
+        $activeTimers = $scan['active'];
+        $cleaned = $this->cleanInactiveTimerTitles($activeTimers);
+        $marked = $this->markActiveTimerTitles($activeTimers);
+
+        $activeList = [];
+        foreach ($activeTimers as $item) {
+            $activeList[] = [
+                'task_id' => $item['task_id'],
+                'title' => $item['title'],
+                'responsible_id' => $item['user_id'],
+                'webhook_user_id' => $item['webhook_user_id'],
+            ];
+            $this->logger->info(sprintf(
+                'Таймер активен: задача #%d (webhook user %s) — %s',
+                $item['task_id'],
+                (string) $item['webhook_user_id'],
+                $item['title']
+            ));
+        }
+
+        $result = [
+            'success' => $marked['success'],
+            'cleaned' => $cleaned,
+            'errors' => $marked['errors'],
+            'active' => count($activeTimers),
+            'scanned' => $scan['scanned'],
+            'active_tasks' => $activeList,
+        ];
+
+        $this->logger->info(sprintf(
+            'Готово: webhooks=%d, scanned=%d, active=%d, marked=%d, cleaned=%d, errors=%d',
+            count($this->clients),
+            $result['scanned'],
+            $result['active'],
+            $result['success'],
+            $result['cleaned'],
+            $result['errors']
+        ));
+
+        return $result;
+    }
+
+    /**
+     * @return array{scanned:int,active:array<int, array{task_id:int,title:string,user_id:?int,webhook_user_id:?int}>}
+     */
+    private function scanAllWebhooksForActiveTimers(): array
+    {
+        $active = [];
+        $scanned = 0;
+
+        foreach ($this->clients as $index => $client) {
+            $webhookUserId = null;
+            try {
+                $profile = $client->call('profile');
+                $webhookUserId = isset($profile['result']['ID']) ? (int) $profile['result']['ID'] : null;
+            } catch (Throwable $e) {
+                $this->logger->error("Webhook #{$index}: profile failed: " . $e->getMessage());
+            }
+
+            $this->logger->info(sprintf(
+                'Сканирую задачи через webhook #%d (user %s)...',
+                $index,
+                $webhookUserId !== null ? (string) $webhookUserId : '?'
+            ));
+
+            $part = $this->scanClientForActiveTimers($client, $webhookUserId);
+            $scanned += $part['scanned'];
+
+            foreach ($part['active'] as $taskId => $item) {
+                $active[$taskId] = $item;
+            }
+        }
+
+        $this->logger->info("Итого проверено задач: {$scanned}, уникальных с таймером: " . count($active));
+
+        return [
+            'scanned' => $scanned,
+            'active' => $active,
+        ];
+    }
+
+    /**
+     * @return array{scanned:int,active:array<int, array{task_id:int,title:string,user_id:?int,webhook_user_id:?int}>}
+     */
+    private function scanClientForActiveTimers(BitrixClient $client, ?int $webhookUserId): array
+    {
+        $active = [];
+        $scanned = 0;
+        $start = 0;
+
+        do {
+            try {
+                $response = $client->call('tasks.task.list', [
+                    'order' => ['ID' => 'DESC'],
+                    'filter' => [
+                        '!REAL_STATUS' => [4, 5],
+                    ],
+                    'select' => [
+                        'ID',
+                        'TITLE',
+                        'RESPONSIBLE_ID',
+                        'STATUS',
+                        'REAL_STATUS',
+                        'TIME_SPENT_IN_LOGS',
+                        'ALLOW_TIME_TRACKING',
+                    ],
+                    'params' => [
+                        'WITH_TIMER_INFO' => true,
+                    ],
+                    'start' => $start,
+                ]);
+            } catch (Throwable $e) {
+                try {
+                    $response = $client->call('tasks.task.list', [
+                        'order' => ['ID' => 'DESC'],
+                        'filter' => [
+                            '!STATUS' => [4, 5],
+                        ],
+                        'select' => [
+                            'ID',
+                            'TITLE',
+                            'RESPONSIBLE_ID',
+                            'STATUS',
+                            'TIME_SPENT_IN_LOGS',
+                            'ALLOW_TIME_TRACKING',
+                        ],
+                        'params' => [
+                            'WITH_TIMER_INFO' => true,
+                        ],
+                        'start' => $start,
+                    ]);
+                } catch (Throwable $e2) {
+                    $this->logger->error('Ошибка tasks.task.list: ' . $e2->getMessage());
+                    break;
+                }
+            }
+
+            $tasks = $response['result']['tasks'] ?? $response['result'] ?? [];
+            if (!is_array($tasks) || $tasks === []) {
+                break;
+            }
+
+            foreach ($tasks as $task) {
+                $scanned++;
+
+                $taskId = (int) ($task['id'] ?? $task['ID'] ?? 0);
+                if ($taskId <= 0) {
+                    continue;
+                }
+
+                $title = (string) ($task['title'] ?? $task['TITLE'] ?? '');
+                $runningFlag = $task['timerIsRunningForCurrentUser']
+                    ?? $task['TIMER_IS_RUNNING_FOR_CURRENT_USER']
+                    ?? 'N';
+
+                $timeSpent = (int) ($task['timeSpentInLogs'] ?? $task['TIME_SPENT_IN_LOGS'] ?? 0);
+                $timeElapsed = (int) ($task['timeElapsed'] ?? $task['TIME_ELAPSED'] ?? $timeSpent);
+                $elapsedSuggestsRunning = $timeElapsed > $timeSpent;
+
+                $isRunning = ($runningFlag === 'Y' || $runningFlag === true || $elapsedSuggestsRunning);
+                if (!$isRunning) {
+                    continue;
+                }
+
+                $active[$taskId] = [
+                    'task_id' => $taskId,
+                    'title' => $title,
+                    'user_id' => isset($task['responsibleId'])
+                        ? (int) $task['responsibleId']
+                        : (isset($task['RESPONSIBLE_ID']) ? (int) $task['RESPONSIBLE_ID'] : null),
+                    'webhook_user_id' => $webhookUserId,
+                ];
+            }
+
+            $start = isset($response['next']) ? (int) $response['next'] : null;
+        } while ($start !== null);
+
+        return [
+            'scanned' => $scanned,
+            'active' => $active,
+        ];
+    }
+
+    /**
+     * @param array<int, mixed> $activeTimerTasks
+     */
+    private function cleanInactiveTimerTitles(array $activeTimerTasks): int
+    {
+        $cleanedCount = 0;
+        $seen = [];
+
+        foreach ($this->titleMarkers as $marker) {
+            try {
+                $tasks = $this->updateClient->callList('tasks.task.list', [
+                    'filter' => [
+                        'TITLE' => '%' . $marker . '%',
+                    ],
+                    'select' => ['ID', 'TITLE'],
+                ]);
+            } catch (Throwable $e) {
+                $this->logger->error("Ошибка поиска задач по маркеру {$marker}: " . $e->getMessage());
+                continue;
+            }
+
+            foreach ($tasks as $task) {
+                $taskId = (int) ($task['id'] ?? $task['ID'] ?? 0);
+                $title = (string) ($task['title'] ?? $task['TITLE'] ?? '');
+
+                if ($taskId <= 0 || $title === '' || isset($seen[$taskId])) {
+                    continue;
+                }
+                $seen[$taskId] = true;
+
+                if (!$this->hasTimerIcon($title)) {
+                    continue;
+                }
+
+                if (isset($activeTimerTasks[$taskId])) {
+                    continue;
+                }
+
+                $cleanTitle = $this->cleanTimerFromTitle($title);
+                if ($cleanTitle === $title) {
+                    continue;
+                }
+
+                if ($this->updateTaskTitle($taskId, $cleanTitle)) {
+                    $cleanedCount++;
+                }
+            }
+        }
+
+        return $cleanedCount;
+    }
+
+    /**
+     * @param array<int, array{task_id:int,title:string,user_id:?int,webhook_user_id:?int}> $activeTimerTasks
+     * @return array{success:int,errors:int}
+     */
+    private function markActiveTimerTitles(array $activeTimerTasks): array
+    {
+        $success = 0;
+        $errors = 0;
+
+        foreach ($activeTimerTasks as $taskId => $timerData) {
+            $title = (string) ($timerData['title'] ?? '');
+
+            if ($title === '') {
+                try {
+                    $response = $this->updateClient->call('tasks.task.get', [
+                        'taskId' => $taskId,
+                        'select' => ['ID', 'TITLE'],
+                    ]);
+                    $task = $response['result']['task'] ?? $response['result'] ?? null;
+                    $title = is_array($task)
+                        ? (string) ($task['title'] ?? $task['TITLE'] ?? '')
+                        : '';
+                } catch (Throwable $e) {
+                    $this->logger->error("Не удалось получить задачу #{$taskId}: " . $e->getMessage());
+                    $errors++;
+                    continue;
+                }
+            }
+
+            if ($title === '') {
+                $this->logger->error("Пустой TITLE у задачи #{$taskId}");
+                $errors++;
+                continue;
+            }
+
+            if ($this->hasTimerIcon($title)) {
+                continue;
+            }
+
+            $newTitle = $this->timerPrefix . $title;
+            if ($this->updateTaskTitle($taskId, $newTitle)) {
+                $success++;
+            } else {
+                $errors++;
+            }
+        }
+
+        return ['success' => $success, 'errors' => $errors];
+    }
+
+    private function updateTaskTitle(int $taskId, string $title): bool
+    {
+        try {
+            $this->updateClient->call('tasks.task.update', [
+                'taskId' => $taskId,
+                'fields' => [
+                    'TITLE' => $title,
+                ],
+            ]);
+            return true;
+        } catch (Throwable $e) {
+            $this->logger->error("Не удалось обновить задачу #{$taskId}: " . $e->getMessage());
+            return false;
+        }
+    }
+
+    private function hasTimerIcon(string $title): bool
+    {
+        foreach ($this->timerPatterns as $pattern) {
+            if (preg_match($pattern, $title)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private function cleanTimerFromTitle(string $title): string
+    {
+        $cleanTitle = $title;
+        foreach ($this->cleaningPatterns as $pattern) {
+            $cleanTitle = preg_replace($pattern, '', $cleanTitle) ?? $cleanTitle;
+        }
+        return trim($cleanTitle);
+    }
+}

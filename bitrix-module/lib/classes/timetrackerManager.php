@@ -1,11 +1,11 @@
 <?php
 namespace LeadSpace\TimeTracker;
-
-use Settings24\GlobalSettings;
+date_default_timezone_set('Europe/Moscow');
 use CModule;
 use CTasks;
 use CTaskTimerManager;
 use CUser;
+use CTaskItem;
 use Exception;
 
 class TimeTrackerManager
@@ -210,14 +210,20 @@ class TimeTrackerManager
     private function updateTask($taskId, $newTitle)
     {
         try {
-            $taskObj = new CTasks();
-            $updateResult = $taskObj->Update($taskId, ['TITLE' => $newTitle]);
-            
-            if ($updateResult) {
+            $adminUserId = 1;
+            $oTaskItem = new CTaskItem($taskId, $adminUserId);
+
+            $updateFields = array(
+                "TITLE" => $newTitle,
+            );
+
+            $result = $oTaskItem->Update($updateFields);
+
+            if ($result) {
                 return ['success' => true, 'message' => 'Обновлено успешно'];
             } else {
-                $this->writeLog('ERROR: Не удалось обновить задачу #' . $taskId . ': ' . $taskObj->LAST_ERROR);
-                return ['success' => false, 'message' => $taskObj->LAST_ERROR];
+                $this->writeLog('ERROR: Не удалось обновить задачу #' . $taskId);
+                return ['success' => false, 'message' => 'Ошибка обновления задачи'];
             }
         } catch (Exception $e) {
             $this->writeLog('ERROR: Исключение при обновлении задачи #' . $taskId . ': ' . $e->getMessage());

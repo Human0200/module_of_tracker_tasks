@@ -1,5 +1,5 @@
 # Logs
-logs
+/logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -29,4 +29,11 @@ coverage
 
 *.tsbuildinfo
 
-admin/html/assets
+
+# Webhook app secrets & runtime
+webhook-app/config.php
+webhook-app/webhooks.json
+webhook-app/logs/*
+!webhook-app/logs/.gitkeep
+bitrix-module/lib/classes/time_tracker.txt
+bitrix-module/admin/html/assets

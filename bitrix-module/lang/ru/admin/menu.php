@@ -1,6 +1,6 @@
 <?php
 $MESS['LEADSPACE_CONNECTION_TITLE'] = 'Поддержка';
-$MESS['LEADSPACE_BX24_MENU_TITLE'] = 'Поддержка';
+$MESS['LEADSPACE_MENU_TITLE'] = 'Поддержка';
 $MESS['LEADSPACE_CONNECTION_DESC'] = 'Поддержка';
 
 
