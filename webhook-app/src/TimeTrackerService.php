@@ -104,7 +104,9 @@ class TimeTrackerService
     {
         $scan = $this->scanAllWebhooksForActiveTimers();
         $activeTimers = $scan['active'];
-        $cleaned = $this->cleanInactiveTimerTitles($activeTimers);
+        // Снимаем префикс по задачам, найденным при полном обходе
+        // (фильтр TITLE %⏱️% в REST Битрикса по эмодзи не работает)
+        $cleaned = $this->cleanInactiveTimerTitles($activeTimers, $scan['prefixed']);
         $marked = $this->markActiveTimerTitles($activeTimers);
 
         $activeList = [];
@@ -146,11 +148,16 @@ class TimeTrackerService
     }
 
     /**
-     * @return array{scanned:int,active:array<int, array{task_id:int,title:string,user_id:?int,webhook_user_id:?int}>}
+     * @return array{
+     *   scanned:int,
+     *   active:array<int, array{task_id:int,title:string,user_id:?int,webhook_user_id:?int}>,
+     *   prefixed:array<int, string>
+     * }
      */
     private function scanAllWebhooksForActiveTimers(): array
     {
         $active = [];
+        $prefixed = [];
         $scanned = 0;
 
         foreach ($this->clients as $index => $client) {
@@ -174,22 +181,36 @@ class TimeTrackerService
             foreach ($part['active'] as $taskId => $item) {
                 $active[$taskId] = $item;
             }
+            foreach ($part['prefixed'] as $taskId => $title) {
+                $prefixed[$taskId] = $title;
+            }
         }
 
-        $this->logger->info("Итого проверено задач: {$scanned}, уникальных с таймером: " . count($active));
+        $this->logger->info(sprintf(
+            'Итого проверено задач: %d, с таймером: %d, с префиксом в TITLE: %d',
+            $scanned,
+            count($active),
+            count($prefixed)
+        ));
 
         return [
             'scanned' => $scanned,
             'active' => $active,
+            'prefixed' => $prefixed,
         ];
     }
 
     /**
-     * @return array{scanned:int,active:array<int, array{task_id:int,title:string,user_id:?int,webhook_user_id:?int}>}
+     * @return array{
+     *   scanned:int,
+     *   active:array<int, array{task_id:int,title:string,user_id:?int,webhook_user_id:?int}>,
+     *   prefixed:array<int, string>
+     * }
      */
     private function scanClientForActiveTimers(BitrixClient $client, ?int $webhookUserId): array
     {
         $active = [];
+        $prefixed = [];
         $scanned = 0;
         $start = 0;
 
@@ -254,6 +275,11 @@ class TimeTrackerService
                 }
 
                 $title = (string) ($task['title'] ?? $task['TITLE'] ?? '');
+
+                if ($title !== '' && $this->hasTimerIcon($title)) {
+                    $prefixed[$taskId] = $title;
+                }
+
                 $runningFlag = $task['timerIsRunningForCurrentUser']
                     ?? $task['TIMER_IS_RUNNING_FOR_CURRENT_USER']
                     ?? 'N';
@@ -283,55 +309,42 @@ class TimeTrackerService
         return [
             'scanned' => $scanned,
             'active' => $active,
+            'prefixed' => $prefixed,
         ];
     }
 
     /**
      * @param array<int, mixed> $activeTimerTasks
+     * @param array<int, string> $prefixedTitles taskId => current TITLE с маркером
      */
-    private function cleanInactiveTimerTitles(array $activeTimerTasks): int
+    private function cleanInactiveTimerTitles(array $activeTimerTasks, array $prefixedTitles): int
     {
         $cleanedCount = 0;
-        $seen = [];
 
-        foreach ($this->titleMarkers as $marker) {
-            try {
-                $tasks = $this->updateClient->callList('tasks.task.list', [
-                    'filter' => [
-                        'TITLE' => '%' . $marker . '%',
-                    ],
-                    'select' => ['ID', 'TITLE'],
-                ]);
-            } catch (Throwable $e) {
-                $this->logger->error("Ошибка поиска задач по маркеру {$marker}: " . $e->getMessage());
+        foreach ($prefixedTitles as $taskId => $title) {
+            $taskId = (int) $taskId;
+            if ($taskId <= 0 || $title === '') {
                 continue;
             }
 
-            foreach ($tasks as $task) {
-                $taskId = (int) ($task['id'] ?? $task['ID'] ?? 0);
-                $title = (string) ($task['title'] ?? $task['TITLE'] ?? '');
+            // Таймер всё ещё активен — префикс оставляем
+            if (isset($activeTimerTasks[$taskId])) {
+                continue;
+            }
 
-                if ($taskId <= 0 || $title === '' || isset($seen[$taskId])) {
-                    continue;
-                }
-                $seen[$taskId] = true;
+            if (!$this->hasTimerIcon($title)) {
+                continue;
+            }
 
-                if (!$this->hasTimerIcon($title)) {
-                    continue;
-                }
+            $cleanTitle = $this->cleanTimerFromTitle($title);
+            if ($cleanTitle === $title) {
+                $this->logger->error("Не удалось очистить TITLE задачи #{$taskId}: {$title}");
+                continue;
+            }
 
-                if (isset($activeTimerTasks[$taskId])) {
-                    continue;
-                }
-
-                $cleanTitle = $this->cleanTimerFromTitle($title);
-                if ($cleanTitle === $title) {
-                    continue;
-                }
-
-                if ($this->updateTaskTitle($taskId, $cleanTitle)) {
-                    $cleanedCount++;
-                }
+            if ($this->updateTaskTitle($taskId, $cleanTitle)) {
+                $this->logger->info("Снят префикс с задачи #{$taskId}: {$cleanTitle}");
+                $cleanedCount++;
             }
         }
 
