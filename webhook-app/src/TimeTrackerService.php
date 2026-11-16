@@ -106,7 +106,10 @@ class TimeTrackerService
         $activeTimers = $scan['active'];
         // Снимаем префикс по задачам, найденным при полном обходе
         // (фильтр TITLE %⏱️% в REST Битрикса по эмодзи не работает)
-        $cleaned = $this->cleanInactiveTimerTitles($activeTimers, $scan['prefixed']);
+        $cleanedOpen = $this->cleanInactiveTimerTitles($activeTimers, $scan['prefixed']);
+        // Отдельный проход: «ждёт контроля» (4) и «завершена» (5)
+        $cleanedDone = $this->cleanPrefixedClosedTasks();
+        $cleaned = $cleanedOpen + $cleanedDone;
         $marked = $this->markActiveTimerTitles($activeTimers);
 
         $activeList = [];
@@ -128,6 +131,8 @@ class TimeTrackerService
         $result = [
             'success' => $marked['success'],
             'cleaned' => $cleaned,
+            'cleaned_open' => $cleanedOpen,
+            'cleaned_closed' => $cleanedDone,
             'errors' => $marked['errors'],
             'active' => count($activeTimers),
             'scanned' => $scan['scanned'],
@@ -135,12 +140,14 @@ class TimeTrackerService
         ];
 
         $this->logger->info(sprintf(
-            'Готово: webhooks=%d, scanned=%d, active=%d, marked=%d, cleaned=%d, errors=%d',
+            'Готово: webhooks=%d, scanned=%d, active=%d, marked=%d, cleaned=%d (open=%d, closed=%d), errors=%d',
             count($this->clients),
             $result['scanned'],
             $result['active'],
             $result['success'],
             $result['cleaned'],
+            $cleanedOpen,
+            $cleanedDone,
             $result['errors']
         ));
 
@@ -347,6 +354,77 @@ class TimeTrackerService
                 $cleanedCount++;
             }
         }
+
+        return $cleanedCount;
+    }
+
+    /**
+     * Отдельный проход: задачи в статусах «ждёт контроля» (4) и «завершена» (5)
+     * с префиксом таймера в TITLE — префикс снимаем всегда.
+     */
+    private function cleanPrefixedClosedTasks(): int
+    {
+        $cleanedCount = 0;
+        $scanned = 0;
+        $start = 0;
+
+        $this->logger->info('Отдельный проход: статусы 4/5 (ждёт контроля / завершена)...');
+
+        do {
+            try {
+                $response = $this->updateClient->call('tasks.task.list', [
+                    'order' => ['ID' => 'DESC'],
+                    'filter' => [
+                        'REAL_STATUS' => [4, 5],
+                    ],
+                    'select' => ['ID', 'TITLE', 'STATUS', 'REAL_STATUS'],
+                    'start' => $start,
+                ]);
+            } catch (Throwable $e) {
+                try {
+                    $response = $this->updateClient->call('tasks.task.list', [
+                        'order' => ['ID' => 'DESC'],
+                        'filter' => [
+                            'STATUS' => [4, 5],
+                        ],
+                        'select' => ['ID', 'TITLE', 'STATUS'],
+                        'start' => $start,
+                    ]);
+                } catch (Throwable $e2) {
+                    $this->logger->error('Ошибка списка закрытых задач: ' . $e2->getMessage());
+                    break;
+                }
+            }
+
+            $tasks = $response['result']['tasks'] ?? $response['result'] ?? [];
+            if (!is_array($tasks) || $tasks === []) {
+                break;
+            }
+
+            foreach ($tasks as $task) {
+                $scanned++;
+                $taskId = (int) ($task['id'] ?? $task['ID'] ?? 0);
+                $title = (string) ($task['title'] ?? $task['TITLE'] ?? '');
+
+                if ($taskId <= 0 || $title === '' || !$this->hasTimerIcon($title)) {
+                    continue;
+                }
+
+                $cleanTitle = $this->cleanTimerFromTitle($title);
+                if ($cleanTitle === $title) {
+                    continue;
+                }
+
+                if ($this->updateTaskTitle($taskId, $cleanTitle)) {
+                    $this->logger->info("Снят префикс с закрытой задачи #{$taskId}: {$cleanTitle}");
+                    $cleanedCount++;
+                }
+            }
+
+            $start = isset($response['next']) ? (int) $response['next'] : null;
+        } while ($start !== null);
+
+        $this->logger->info("Закрытые задачи: scanned={$scanned}, cleaned={$cleanedCount}");
 
         return $cleanedCount;
     }
